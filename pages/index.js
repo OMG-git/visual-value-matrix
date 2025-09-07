@@ -1,90 +1,159 @@
-// ReactとNext.jsで必要な基本部品をインポート
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
-// rechartsライブラリから、チャート作成に必要な部品をインポート
-import { ScatterChart, Scatter, XAxis, YAxis, ZAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { ScatterChart, Scatter, XAxis, YAxis, ZAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Label } from 'recharts';
 
-// ★★★ データ取得先 ★★★
-// AWSのURLではなく、Step 2-3で作成した「中継役」のURLを指定します。
-// これにより、ブラウザはAWSの存在を一切知りません。
 const API_ENDPOINT = '/api/stocks';
 
-// ... (ファイルの上部)
-
-// チャートのバブルにマウスを乗せた時に表示される情報ボックスの見た目を定義
+// --- ツールチップコンポーネント ---
 const CustomTooltip = ({ active, payload }) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     return (
-      // ↓↓↓ このdivのstyleを修正しました ↓↓↓
       <div style={{
-        backgroundColor: '#E0F7FA', // 明るい水色の背景
-        border: '1px solid #B2EBF2',  // 背景より少しだけ濃い水色の境界線
-        borderRadius: '8px',          // 角を丸くする
-        padding: '12px',              // 内側の余白
-        color: '#000000',             // ★★★ 文字色を黒に指定 ★★★
-        boxShadow: '0 4px 8px rgba(0,0,0,0.1)' // わずかな影
+        backgroundColor: '#FFFFFF', border: '1px solid #DDDDDD', borderRadius: '8px',
+        padding: '12px', color: '#333333', boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
       }}>
-        {/* pタグのstyleはシンプルに戻し、親divから文字色を継承させます */}
-        <p style={{ margin: '0 0 5px 0', fontWeight: 'bold' }}>{data.name} ({data.ticker})</p>
+        <p style={{ margin: '0 0 8px 0', fontWeight: 'bold', fontSize: '1.1em' }}>{data.name} ({data.ticker})</p>
         <p style={{ margin: 0 }}>PBR (割安性): {data.pbr.toFixed(2)}</p>
         <p style={{ margin: 0 }}>ROE (収益性): {(data.roe * 100).toFixed(2)}%</p>
-        <p style={{ margin: 0 }}>時価総額: {(data.marketCap / 1e9).toFixed(2)}B (十億ドル)</p>
+        <p style={{ margin: 0 }}>時価総額: {(data.marketCap / 1e9).toFixed(2)}B</p>
       </div>
     );
   }
   return null;
 };
-// ... (以下略)
 
-// このページの本体部分
+// --- メインページコンポーネント ---
 export default function Home() {
-  // 状態(state)を管理するための変数を定義
-  // data: APIから取得した株価データ。最初は空っぽの配列[]。
-  // loading: データを読み込み中かどうかを示すフラグ。最初はtrue(読み込み中)。
-  const [data, setData] = useState([]);
+  const [allData, setAllData] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
+  const [activeQuadrant, setActiveQuadrant] = useState('ALL'); // ALL, TOP_RIGHT, TOP_LEFT, BOTTOM_LEFT, BOTTOM_RIGHT
 
-  // useEffect: このページが最初に表示された時に、一度だけ実行される処理
+  // --- データ取得と平均値の計算 ---
+  const { processedData, avgPbr, avgRoe } = useMemo(() => {
+    if (!allData.length) return { processedData: [], avgPbr: 1, avgRoe: 0.15 };
+    
+    // 外れ値を除外
+    const filtered = allData.filter(d => 
+      d.pbr > 0 && d.roe > -0.5 && d.pbr < 25 && d.roe < 1 // PBR < 25x, -50% < ROE < 100%
+    );
+
+    // PBRとROEの中央値を計算（平均値より外れ値に強い）
+    const sortedPbr = [...filtered].sort((a, b) => a.pbr - b.pbr);
+    const sortedRoe = [...filtered].sort((a, b) => a.roe - b.roe);
+    const mid = Math.floor(sortedPbr.length / 2);
+    const medianPbr = sortedPbr.length % 2 === 0 ? (sortedPbr[mid - 1].pbr + sortedPbr[mid].pbr) / 2 : sortedPbr[mid].pbr;
+    const medianRoe = sortedRoe.length % 2 === 0 ? (sortedRoe[mid - 1].roe + sortedRoe[mid].roe) / 2 : sortedRoe[mid].roe;
+
+    return { processedData: filtered, avgPbr: medianPbr, avgRoe: medianRoe };
+  }, [allData]);
+
+  // --- 表示用データのフィルタリング ---
+  const filteredForDisplay = useMemo(() => {
+    const checkQuadrant = (item) => {
+      if (activeQuadrant === 'ALL') return true;
+      if (activeQuadrant === 'TOP_RIGHT') return item.pbr >= avgPbr && item.roe >= avgRoe;
+      if (activeQuadrant === 'TOP_LEFT') return item.pbr < avgPbr && item.roe >= avgRoe;
+      if (activeQuadrant === 'BOTTOM_LEFT') return item.pbr < avgPbr && item.roe < avgRoe;
+      if (activeQuadrant === 'BOTTOM_RIGHT') return item.pbr >= avgPbr && item.roe < avgRoe;
+      return true;
+    };
+    
+    const lowerCaseSearchTerm = searchTerm.toLowerCase();
+    const hasSearchTerm = searchTerm !== '';
+
+    return processedData.map(item => {
+      const isInSearch = hasSearchTerm ? (item.ticker.toLowerCase().includes(lowerCaseSearchTerm) || item.name.toLowerCase().includes(lowerCaseSearchTerm)) : true;
+      const isInQuadrant = checkQuadrant(item);
+      
+      let opacity = 0.7;
+      if (!isInQuadrant) opacity = 0.05;
+      if (hasSearchTerm && !isInSearch) opacity = 0.05;
+      if (hasSearchTerm && isInSearch) opacity = 1.0;
+
+      return { ...item, fillOpacity: opacity };
+    });
+  }, [processedData, searchTerm, activeQuadrant, avgPbr, avgRoe]);
+
+
+  // --- データ取得ロジック ---
   useEffect(() => {
-    // データを取得する非同期関数を定義
     const fetchData = async () => {
+      setLoading(true);
       try {
-        // axiosを使って、定義したAPI_ENDPOINTにGETリクエストを送る
         const response = await axios.get(API_ENDPOINT);
-        // 取得したデータで state を更新する
-        setData(response.data);
+        setAllData(response.data);
       } catch (error) {
         console.error("データの取得に失敗しました:", error);
       } finally {
-        // 成功しても失敗しても、最後にローディング状態をfalse(完了)にする
         setLoading(false);
       }
     };
-    // 上で定義した関数を実行
     fetchData();
-  }, []); // 第2引数の[]は「最初の一度だけ実行」を意味するおまじない
+  }, []);
+  
+  const QuadrantButton = ({ quadrant, label }) => (
+    <button onClick={() => setActiveQuadrant(quadrant)}
+      style={{
+        padding: '8px 16px', fontSize: '0.9em', border: '1px solid #ccc',
+        borderRadius: '20px', margin: '0 5px', cursor: 'pointer',
+        backgroundColor: activeQuadrant === quadrant ? '#3f51b5' : '#fff',
+        color: activeQuadrant === quadrant ? '#fff' : '#333',
+        transition: 'all 0.2s'
+      }}>
+      {label}
+    </button>
+  );
 
-  // もしローディング中(loadingがtrue)なら、このメッセージを表示
-  if (loading) {
-    return <div style={{ textAlign: 'center', marginTop: '50px' }}>データをAWSから読み込み中...</div>;
-  }
-
-  // ローディングが終わったら、以下のHTMLとチャートを表示
   return (
-    <div style={{ width: '95vw', height: '95vh', margin: 'auto' }}>
-      <h1 style={{ textAlign: 'center' }}>Visual Value Matrix (PBR vs ROE)</h1>
-      <ResponsiveContainer width="100%" height="90%">
-        <ScatterChart margin={{ top: 20, right: 30, bottom: 40, left: 30 }}>
-          <CartesianGrid />
-          <XAxis type="number" dataKey="pbr" name="PBR" domain={['dataMin', 'dataMax']} label={{ value: "PBR (低いほど割安 →)", position: "insideBottom", offset: -25 }} />
-          <YAxis type="number" dataKey="roe" name="ROE" unit="%" tickFormatter={(tick) => (tick * 100).toFixed(0)} label={{ value: "ROE (高いほど高収益 ↑)", angle: -90, position: 'insideLeft' }} />
-          <ZAxis type="number" dataKey="marketCap" range={[100, 1000]} name="時価総額" />
-          <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<CustomTooltip />} />
-          <Legend verticalAlign="top" height={36} />
-          <Scatter name="銘柄" data={data} fill="#8884d8" />
-        </ScatterChart>
-      </ResponsiveContainer>
+    <div style={{ fontFamily: 'sans-serif', backgroundColor: '#f4f7f6', minHeight: '100vh', padding: '2rem' }}>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        <header style={{ textAlign: 'center', marginBottom: '1rem' }}>
+          <h1 style={{ margin: 0, color: '#1a237e' }}>Visual Value Matrix</h1>
+          <p style={{ margin: '0.5rem 0', fontSize: '1.1rem' }}>S&P 100銘柄 PBR-ROE 分布マップ</p>
+        </header>
+
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', marginBottom: '1rem', flexWrap: 'wrap' }}>
+          <input type="text" placeholder="銘柄名・ティッカーで検索..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+            style={{ width: '40%', padding: '10px 15px', borderRadius: '20px', border: '1px solid #ccc' }} />
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+          <QuadrantButton quadrant="ALL" label="全表示" />
+          <QuadrantButton quadrant="TOP_LEFT" label="お宝株 (高ROE/低PBR)" />
+          <QuadrantButton quadrant="TOP_RIGHT" label="優良株 (高ROE/高PBR)" />
+          <QuadrantButton quadrant="BOTTOM_LEFT" label="バリュー株 (低ROE/低PBR)" />
+          <QuadrantButton quadrant="BOTTOM_RIGHT" label="割高注意 (低ROE/高PBR)" />
+        </div>
+
+        <main style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '1rem', boxShadow: '0 8px 24px rgba(0,0,0,0.08)' }}>
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: '5rem' }}>データを読み込み中...</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={600}>
+              <ScatterChart margin={{ top: 20, right: 40, bottom: 50, left: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" dataKey="pbr" name="PBR" domain={[0, 'dataMax']} label={{ value: "PBR (割安性 →)", position: "insideBottom", offset: -35 }} />
+                <YAxis type="number" dataKey="roe" name="ROE" tickFormatter={(tick) => `${(tick * 100).toFixed(0)}%`} domain={['auto', 'auto']} label={{ value: "ROE (収益性 ↑)", angle: -90, position: 'insideLeft' }} />
+                <ZAxis type="number" dataKey="marketCap" range={[60, 1000]} name="時価総額" />
+                <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<CustomTooltip />} />
+                <Legend verticalAlign="top" height={36} />
+                
+                {/* 中央値を基準線として描画 */}
+                <ReferenceLine y={avgRoe} stroke="#e91e63" strokeDasharray="3 3">
+                  <Label value={`ROE中央値: ${(avgRoe * 100).toFixed(1)}%`} position="insideTopRight" fill="#e91e63" />
+                </ReferenceLine>
+                <ReferenceLine x={avgPbr} stroke="#2196f3" strokeDasharray="3 3">
+                  <Label value={`PBR中央値: ${avgPbr.toFixed(1)}`} position="insideTopRight" fill="#2196f3" />
+                </ReferenceLine>
+                
+                <Scatter name="S&P 100" data={filteredForDisplay} fill="#3f51b5" fillOpacity={item => item.fillOpacity} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
